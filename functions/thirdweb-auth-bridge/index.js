@@ -1,25 +1,31 @@
-/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars */
 const { Client, Users, Databases, Query } = require('node-appwrite');
 
 module.exports = async ({ req, res, log, error }) => {
-  const { walletAddress } = JSON.parse(req.body);
-
-  if (!walletAddress) {
-    return res.json({ success: false, error: 'Wallet address is required' }, 400);
-  }
-
-  const client = new Client()
-    .setEndpoint(process.env.APPWRITE_FUNCTION_ENDPOINT)
-    .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
-    .setKey(process.env.APPWRITE_API_KEY);
-
-  const users = new Users(client);
-  const databases = new Databases(client);
+  log('🚀 Function started. Body type: ' + typeof req.body);
 
   try {
-    // 1. Check if user exists in your Appwrite database
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const walletAddress = body.walletAddress;
+
+    log('🚀 Wallet address received: ' + walletAddress);
+
+    if (!walletAddress) {
+      return res.json({ success: false, error: 'Wallet address is required' }, 400);
+    }
+
+    // Hardcoded values — no more undefined env vars!
+    const client = new Client()
+      .setEndpoint('https://fra.cloud.appwrite.io/v1')
+      .setProject('6a958751003ddf56c626')
+      .setKey(process.env.APPWRITE_API_KEY);
+
+    const users = new Users(client);
+    const databases = new Databases(client);
+
+    log('🚀 Checking for existing user...');
+
     const userList = await databases.listDocuments(
-      process.env.APPWRITE_DATABASE_ID, 
+      '6a95dc45001293a69918', // Hardcoded DB ID
       'users',
       [Query.equal('wallet_address', walletAddress)]
     );
@@ -27,21 +33,20 @@ module.exports = async ({ req, res, log, error }) => {
     let appwriteUserId;
 
     if (userList.total > 0) {
-      // User exists, get their Appwrite ID
       appwriteUserId = userList.documents[0].user_id;
+      log('🚀 Existing user found: ' + appwriteUserId);
     } else {
-      // 2. Create a new Appwrite user for this wallet
+      log('🚀 Creating new user...');
       const newUser = await users.create(
         'unique()',
-        `${walletAddress}@wallet.digistok.com`, // Temporary email for Appwrite Auth
+        `${walletAddress}@wallet.digistok.com`,
         undefined,
         walletAddress
       );
       appwriteUserId = newUser.$id;
 
-      // 3. Create the user profile in your 'users' table
       await databases.createDocument(
-        process.env.APPWRITE_DATABASE_ID,
+        '6a95dc45001293a69918',
         'users',
         'unique()',
         {
@@ -51,20 +56,20 @@ module.exports = async ({ req, res, log, error }) => {
           fica_status: 'pending',
         }
       );
+      log('🚀 New user created: ' + appwriteUserId);
     }
 
-    // 4. Generate a short-lived custom token for this user
     const token = await users.createToken(appwriteUserId);
+    log('🚀 Token generated successfully');
 
-    // 5. Return the token secret to the client
-    return res.json({ 
-      success: true, 
-      userId: appwriteUserId, 
-      secret: token.secret 
+    return res.json({
+      success: true,
+      userId: appwriteUserId,
+      secret: token.secret
     });
 
   } catch (err) {
-    error('Error creating session token: ' + err.message);
-    return res.json({ success: false, error: err.message }, 500);
+    error('💥 Function crashed: ' + (err.message || JSON.stringify(err)));
+    return res.json({ success: false, error: err.message || 'Unknown error' }, 500);
   }
 };
