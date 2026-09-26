@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Ignore Appwrite backend functions (they use CommonJS require())
+    "functions/**",
   ]),
 ]);
 

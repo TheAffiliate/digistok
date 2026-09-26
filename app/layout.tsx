@@ -2,6 +2,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThirdwebProvider } from "thirdweb/react";
+import { AuthProvider } from "@/lib/AuthContext"; // 1. Import AuthProvider
 import "./globals.css";
 
 const geistSans = Geist({
@@ -31,7 +32,10 @@ export default function RootLayout({
     >
       <body className="min-h-screen bg-[#140e0c] text-slate-200">
         <ThirdwebProvider>
-          {children}
+          {/* 2. Wrap children with AuthProvider, inside ThirdwebProvider */}
+          <AuthProvider>
+            {children}
+          </AuthProvider>
         </ThirdwebProvider>
       </body>
     </html>
