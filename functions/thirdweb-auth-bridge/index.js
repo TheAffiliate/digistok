@@ -52,6 +52,7 @@ module.exports = async ({ req, res, log, error }) => {
         {
           user_id: appwriteUserId,
           wallet_address: walletAddress,
+          email: `${walletAddress}@wallet.digistok.com`,  // <-- Added
           full_name: `User ${walletAddress.slice(0, 6)}`,
           fica_status: 'pending',
         }
