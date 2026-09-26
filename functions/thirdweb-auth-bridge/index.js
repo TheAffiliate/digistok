@@ -24,19 +24,30 @@ module.exports = async ({ req, res, log, error }) => {
 
     log('🚀 Checking for existing user...');
 
-    const userList = await databases.listDocuments(
-      '6a95dc45001293a69918', // Hardcoded DB ID
-      'users',
-      [Query.equal('wallet_address', walletAddress)]
-    );
+   // Replace the section that handles existing users with this:
 
-    let appwriteUserId;
+  const userList = await databases.listDocuments(
+    '6a95dc45001293a69918',
+    'users',
+    [Query.equal('wallet_address', walletAddress)]
+  );
 
-    if (userList.total > 0) {
-      appwriteUserId = userList.documents[0].user_id;
-      log('🚀 Existing user found: ' + appwriteUserId);
-    } else {
-      log('🚀 Creating new user...');
+  let appwriteUserId;
+
+  if (userList.total > 0) {
+    // Document exists — use it
+    appwriteUserId = userList.documents[0].user_id;
+    log('🚀 Existing user found: ' + appwriteUserId);
+  } else {
+    // No document. Check if an Auth user already exists with this email
+    try {
+      const existingAuthUser = await users.get(
+        (await users.list([Query.equal('email', `${walletAddress}@wallet.digistok.com`)])).users[0]?.$id
+      );
+      appwriteUserId = existingAuthUser.$id;
+      log('🚀 Existing Auth user found: ' + appwriteUserId);
+    } catch {
+      // Auth user doesn't exist either — create a new one
       const newUser = await users.create(
         'unique()',
         `${walletAddress}@wallet.digistok.com`,
@@ -44,21 +55,24 @@ module.exports = async ({ req, res, log, error }) => {
         walletAddress
       );
       appwriteUserId = newUser.$id;
-
-      await databases.createDocument(
-        '6a95dc45001293a69918',
-        'users',
-        'unique()',
-        {
-          user_id: appwriteUserId,
-          wallet_address: walletAddress,
-          email: `${walletAddress}@wallet.digistok.com`,  // <-- Added
-          full_name: `User ${walletAddress.slice(0, 6)}`,
-          fica_status: 'pending',
-        }
-      );
-      log('🚀 New user created: ' + appwriteUserId);
+      log('🚀 New Auth user created: ' + appwriteUserId);
     }
+
+    // Create the missing document in the users collection
+    await databases.createDocument(
+      '6a95dc45001293a69918',
+      'users',
+      appwriteUserId, // Use Auth ID as document ID
+      {
+        user_id: appwriteUserId,
+        wallet_address: walletAddress,
+        email: `${walletAddress}@wallet.digistok.com`,
+        full_name: `User ${walletAddress.slice(0, 6)}`,
+        fica_status: 'pending',
+      }
+    );
+    log('🚀 New user document created');
+  }
 
     const token = await users.createToken(appwriteUserId);
     log('🚀 Token generated successfully');

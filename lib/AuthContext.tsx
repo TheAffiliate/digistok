@@ -1,9 +1,16 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+} from 'react';
 import { useRouter } from 'next/navigation';
-import { account, databases, functions } from '@/lib/appwrite'; 
-import { OAuthProvider } from 'appwrite';
+import { account, databases, functions } from '@/lib/appwrite';
+import { OAuthProvider, Query } from 'appwrite';
 import { useActiveAccount } from 'thirdweb/react';
 
 export interface AuthUser {
@@ -32,6 +39,7 @@ interface AuthContextType {
   loginWithEmail: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  bridgeWallet: (walletAddress: string) => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -49,26 +57,76 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [userRole] = useState<'super_admin' | 'group_admin' | 'member'>('member');
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
-  
+
   const activeAccount = useActiveAccount();
-  
-  // useRef instead of useState to prevent re-render loops
   const isSyncingRef = useRef(false);
 
+  // ---------- Fetch user profile (query by user_id field, not document ID) ----------
   const fetchUserProfile = useCallback(async (userId: string) => {
     try {
       const dbId = process.env.NEXT_PUBLIC_APPWRITE_DATABASE_ID!;
-      const userDoc = await databases.getDocument(dbId, 'users', userId);
-      
-      const userData = userDoc as unknown as AuthUser;
-      setUser(userData);
+
+      const res = await databases.listDocuments(dbId, 'users', [
+        Query.equal('user_id', userId),
+      ]);
+
+      if (res.total === 0) {
+        console.warn('No user profile found for Auth ID:', userId);
+        setUser(null);
+        return;
+      }
+
+      setUser(res.documents[0] as unknown as AuthUser);
     } catch (error) {
       console.error('Error fetching user profile:', error);
-      setUser(null); 
+      setUser(null);
     }
   }, []);
 
-  // 1. Initial Load: Check Appwrite session on mount
+  // ---------- Bridge Wallet → Appwrite session (callable) ----------
+  const bridgeWallet = useCallback(
+    async (walletAddress: string): Promise<boolean> => {
+      if (!walletAddress || isSyncingRef.current) return false;
+
+      // If we already have a session, just refresh the profile
+      try {
+        const session = await account.get();
+        if (session) {
+          await fetchUserProfile(session.$id);
+          return true;
+        }
+      } catch {
+        // No session, proceed to bridge
+      }
+
+      isSyncingRef.current = true;
+      try {
+        const execution = await functions.createExecution(
+          process.env.NEXT_PUBLIC_APPWRITE_FUNCTION_ID!,
+          JSON.stringify({ walletAddress })
+        );
+
+        const response = JSON.parse(execution.responseBody);
+
+        if (response.success) {
+          await account.createSession(response.userId, response.secret);
+          await fetchUserProfile(response.userId);
+          return true;
+        }
+
+        console.error('Bridge function failed:', response.error);
+        return false;
+      } catch (error) {
+        console.error('Error bridging wallet to Appwrite:', error);
+        return false;
+      } finally {
+        isSyncingRef.current = false;
+      }
+    },
+    [fetchUserProfile]
+  );
+
+  // ---------- Initial load: check Appwrite session ----------
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -77,28 +135,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           await fetchUserProfile(session.$id);
         }
       } catch {
-        // No active session, silently ignore
         setUser(null);
       } finally {
         setIsLoading(false);
       }
     };
-
     initAuth();
   }, [fetchUserProfile]);
 
-  // 2. Bridge Thirdweb to Appwrite & Sync Wallet Address
+  // ---------- Auto-bridge whenever Thirdweb wallet connects ----------
   useEffect(() => {
-    const syncOrBridgeWallet = async () => {
-      // Use the ref here instead of state
-      if (!activeAccount?.address || isSyncingRef.current) return;
+    if (!activeAccount?.address) return;
 
-      // A. Check if we already have an Appwrite session
+    // If we already have a session with a user, just sync the wallet address
+    const syncWallet = async () => {
       try {
         const session = await account.get();
         if (session) {
           if (user && user.wallet_address !== activeAccount.address) {
-            // User is logged in, but connected a different wallet. Update the DB.
             try {
               await databases.updateDocument(
                 process.env.NEXT_PUBLIC_APPWRITE_DATABASE_ID!,
@@ -106,54 +160,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 user.$id,
                 { wallet_address: activeAccount.address }
               );
-              setUser(prev => prev ? { ...prev, wallet_address: activeAccount.address } : null);
+              setUser((prev) =>
+                prev ? { ...prev, wallet_address: activeAccount.address } : null
+              );
             } catch (err) {
-              console.error('Failed to update wallet address in profile:', err);
+              console.error('Failed to update wallet address:', err);
             }
           } else if (!user) {
-            // Session exists but user object is missing (e.g., page refresh). Fetch it.
             await fetchUserProfile(session.$id);
           }
-          return; // We have a session and profile is synced.
+          return;
         }
       } catch {
-        // No active Appwrite session, proceed to bridging
+        // No session, proceed with bridge
       }
 
-      // B. No Appwrite session. Bridge the wallet to create one.
-      isSyncingRef.current = true; // Set the ref
-      try {
-        const execution = await functions.createExecution(
-          process.env.NEXT_PUBLIC_APPWRITE_FUNCTION_ID!,
-          JSON.stringify({ walletAddress: activeAccount.address })
-        );
-
-        const response = JSON.parse(execution.responseBody);
-
-        if (response.success) {
-          // Create Appwrite session using the custom token from the function
-          await account.createSession(response.userId, response.secret);
-          // Fetch the newly created or existing profile
-          await fetchUserProfile(response.userId);
-        } else {
-          console.error('Bridge function failed:', response.error);
-        }
-      } catch (error) {
-        console.error('Error bridging Thirdweb wallet to Appwrite:', error);
-      } finally {
-        isSyncingRef.current = false; // Reset the ref
-      }
+      // No session — bridge the wallet
+      await bridgeWallet(activeAccount.address);
     };
 
-    syncOrBridgeWallet();
-  }, [activeAccount?.address, user, fetchUserProfile]);
+    syncWallet();
+  }, [activeAccount?.address, user, fetchUserProfile, bridgeWallet]);
 
+  // ---------- Auth actions ----------
   const loginWithGoogle = async () => {
     try {
       await account.createOAuth2Session(
         OAuthProvider.Google,
-        'http://localhost:3000/dashboard', 
-        'http://localhost:3000/auth'       
+        'http://localhost:3000/dashboard',
+        'http://localhost:3000/auth'
       );
     } catch (error) {
       console.error('Google login failed:', error);
@@ -190,16 +225,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{
-      user,
-      userRole,
-      isLoading,
-      isAuthenticated: !!user,
-      loginWithGoogle,
-      loginWithEmail,
-      logout,
-      refreshUser
-    }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        userRole,
+        isLoading,
+        isAuthenticated: !!user,
+        loginWithGoogle,
+        loginWithEmail,
+        logout,
+        refreshUser,
+        bridgeWallet, // ✅ Now included — this was the missing piece
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
